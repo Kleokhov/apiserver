@@ -73,6 +73,7 @@ type EtcdOptions struct {
 
 var storageTypes = sets.NewString(
 	storagebackend.StorageTypeETCD3,
+	storagebackend.StorageTypeDynamo,
 )
 
 func NewEtcdOptions(backendConfig *storagebackend.Config) *EtcdOptions {
