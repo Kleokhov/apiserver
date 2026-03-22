@@ -24,8 +24,6 @@ import (
 	"net/url"
 	"testing"
 	"time"
-
-	"k8s.io/apiserver/pkg/endpoints/request"
 )
 
 func TestWithHTTP1(t *testing.T) {
@@ -224,8 +222,7 @@ func newServer(t *testing.T, h http.Handler, http2 bool) *httptest.Server {
 }
 
 func sendRequest(t *testing.T, server *httptest.Server) {
-	ctx := t.Context()
-	req, err := http.NewRequestWithContext(ctx, request.MethodGet, server.URL, nil)
+	req, err := http.NewRequest("GET", server.URL, nil)
 	if err != nil {
 		t.Fatalf("error creating request: %v", err)
 	}

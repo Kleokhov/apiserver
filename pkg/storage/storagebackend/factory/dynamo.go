@@ -25,8 +25,8 @@ func newDynamoStorage(
 	resourcePrefix string,
 ) (storage.Interface, DestroyFunc, error) {
 
-	//// print out a test message
-	//fmt.Println("Initializing DynamoDB storage backend...")
+	// print out a test message
+	fmt.Println("Initializing DynamoDB storage backend...")
 	//
 	//return nil, nil, nil
 
@@ -48,7 +48,7 @@ func newDynamoStorage(
 		return nil, nil, err
 	}
 
-	bootstrap := true
+	bootstrap := c.Dynamo.Endpoint != ""
 
 	s, err := dynamo.New(
 		context.Background(),

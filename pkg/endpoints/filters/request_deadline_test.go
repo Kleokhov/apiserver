@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -70,8 +71,7 @@ func TestParseTimeout(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ctx := t.Context()
-			request, err := http.NewRequestWithContext(ctx, http.MethodGet, test.url, nil)
+			request, err := http.NewRequest(http.MethodGet, test.url, nil)
 			if err != nil {
 				t.Fatalf("failed to create new http request - %v", err)
 			}
@@ -408,21 +408,21 @@ func TestWithFailedRequestAudit(t *testing.T) {
 					t.Errorf("expected an http.ResponseWriter of type: %T but got: %T", &auditResponseWriter{}, rwGot)
 				}
 
-				auditContext := audit.AuditContextFrom(requestGot.Context())
-				if auditContext == nil {
+				auditEventGot := audit.AuditEventFrom(requestGot.Context())
+				if auditEventGot == nil {
 					t.Fatal("expected an audit event object but got nil")
 				}
-				if auditContext.GetEventStage() != auditinternal.StageResponseStarted {
-					t.Errorf("expected audit event Stage: %s, but got: %s", auditinternal.StageResponseStarted, auditContext.GetEventStage())
+				if auditEventGot.Stage != auditinternal.StageResponseStarted {
+					t.Errorf("expected audit event Stage: %s, but got: %s", auditinternal.StageResponseStarted, auditEventGot.Stage)
 				}
-				if auditContext.GetEventResponseStatus() == nil {
+				if auditEventGot.ResponseStatus == nil {
 					t.Fatal("expected a ResponseStatus field of the audit event object, but got nil")
 				}
-				if test.statusCodeExpected != int(auditContext.GetEventResponseStatus().Code) {
-					t.Errorf("expected audit event ResponseStatus.Code: %d, but got: %d", test.statusCodeExpected, auditContext.GetEventResponseStatus().Code)
+				if test.statusCodeExpected != int(auditEventGot.ResponseStatus.Code) {
+					t.Errorf("expected audit event ResponseStatus.Code: %d, but got: %d", test.statusCodeExpected, auditEventGot.ResponseStatus.Code)
 				}
-				if test.statusErr.Error() != auditContext.GetEventResponseStatus().Message {
-					t.Errorf("expected audit event ResponseStatus.Message: %s, but got: %s", test.statusErr, auditContext.GetEventResponseStatus().Message)
+				if test.statusErr.Error() != auditEventGot.ResponseStatus.Message {
+					t.Errorf("expected audit event ResponseStatus.Message: %s, but got: %s", test.statusErr, auditEventGot.ResponseStatus.Message)
 				}
 
 				// verify that the audit event from the request context is written to the audit sink.
@@ -430,12 +430,8 @@ func TestWithFailedRequestAudit(t *testing.T) {
 					t.Fatalf("expected audit sink to have 1 event, but got: %d", len(fakeSink.events))
 				}
 				auditEventFromSink := fakeSink.events[0]
-				eventFromAuditContext := getAuditContextEvent(auditContext)
-
-				if diff := cmp.Diff(eventFromAuditContext, auditEventFromSink, cmp.FilterPath(func(p cmp.Path) bool {
-					return p.String() == "StageTimestamp"
-				}, cmp.Ignore())); diff != "" {
-					t.Errorf("expected the audit event from the request context to be written to the audit sink, but got diffs: %s", diff)
+				if !reflect.DeepEqual(auditEventGot, auditEventFromSink) {
+					t.Errorf("expected the audit event from the request context to be written to the audit sink, but got diffs: %s", cmp.Diff(auditEventGot, auditEventFromSink))
 				}
 			}
 		})
@@ -443,12 +439,12 @@ func TestWithFailedRequestAudit(t *testing.T) {
 }
 
 func newRequest(t *testing.T, requestURL string) *http.Request {
-	ctx := t.Context()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	req, err := http.NewRequest(http.MethodGet, requestURL, nil)
 	if err != nil {
 		t.Fatalf("failed to create new http request - %v", err)
 	}
-	return req.WithContext(audit.WithAuditContext(req.Context()))
+	ctx := audit.WithAuditContext(req.Context())
+	return req.WithContext(ctx)
 }
 
 func message(err error) string {

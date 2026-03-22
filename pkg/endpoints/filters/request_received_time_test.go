@@ -27,7 +27,6 @@ import (
 )
 
 func TestWithRequestReceivedTimestamp(t *testing.T) {
-	ctx := t.Context()
 	receivedTimestampExpected := time.Now()
 
 	var (
@@ -44,7 +43,7 @@ func TestWithRequestReceivedTimestamp(t *testing.T) {
 
 	wrapped := withRequestReceivedTimestampWithClock(handler, testingclock.NewFakeClock(receivedTimestampExpected))
 
-	testRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, "/api/v1/namespaces", nil)
+	testRequest, err := http.NewRequest(http.MethodGet, "/api/v1/namespaces", nil)
 	if err != nil {
 		t.Fatalf("failed to create new http request - %v", err)
 	}

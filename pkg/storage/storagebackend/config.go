@@ -106,7 +106,6 @@ type Config struct {
 	// number of objects in the storage per resource.
 	StorageObjectCountTracker flowcontrolrequest.StorageObjectCountTracker
 
-	// DynamoDB is used when Type == StorageTypeDynamo
 	Dynamo DynamoDBConfig
 }
 

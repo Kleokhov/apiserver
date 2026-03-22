@@ -1,4 +1,5 @@
 //go:build !windows
+// +build !windows
 
 /*
 Copyright 2022 The Kubernetes Authors.
@@ -57,7 +58,6 @@ type Base64Plugin struct {
 	ver                string
 	socketPath         string
 	keyID              string
-	kmsapi.UnsafeKeyManagementServiceServer
 }
 
 // NewBase64Plugin is a constructor for Base64Plugin.

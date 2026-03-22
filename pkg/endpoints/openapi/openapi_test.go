@@ -42,11 +42,12 @@ func TestGetDefinitionName(t *testing.T) {
 	// in production, the name is stripped of ".*vendor/" prefix before passed
 	// to GetDefinitionName, so here typePkgName does not have the
 	// "k8s.io/kubernetes/vendor" prefix.
+	typePkgName := "k8s.io/apiserver/pkg/endpoints/openapi/testing.TestType"
 	typeFriendlyName := "io.k8s.apiserver.pkg.endpoints.openapi.testing.TestType"
 	s := runtime.NewScheme()
 	s.AddKnownTypeWithName(testType.GroupVersionKind(), &testType)
 	namer := NewDefinitionNamer(s)
-	n, e := namer.GetDefinitionName(typeFriendlyName)
+	n, e := namer.GetDefinitionName(typePkgName)
 	assertEqual(t, typeFriendlyName, n)
 	assertEqual(t, []interface{}{
 		map[string]interface{}{
@@ -55,7 +56,7 @@ func TestGetDefinitionName(t *testing.T) {
 			"kind":    "TestType",
 		},
 	}, e["x-kubernetes-group-version-kind"])
-	n, e2 := namer.GetDefinitionName("com.test.another.Type")
+	n, e2 := namer.GetDefinitionName("test.com/another.Type")
 	assertEqual(t, "com.test.another.Type", n)
 	assertEqual(t, e2, spec.Extensions(nil))
 }

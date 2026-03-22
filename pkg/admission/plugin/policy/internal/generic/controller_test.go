@@ -38,7 +38,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/apiserver/pkg/admission/plugin/policy/internal/generic"
 
 	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
@@ -102,7 +101,7 @@ func init() {
 
 func setupTest(ctx context.Context, customReconciler func(string, string, runtime.Object) error) (
 	tracker clienttesting.ObjectTracker,
-	controller generic.Controller[*unstructured.Unstructured],
+	controller Controller[*unstructured.Unstructured],
 	informer *testInformer,
 	waitForReconcile func(runtime.Object) error,
 	verifyNoMoreEvents func() bool,
@@ -112,14 +111,14 @@ func setupTest(ctx context.Context, customReconciler func(string, string, runtim
 
 	// Set up fake informers that return instances of mock Policy definitoins
 	// and mock policy bindings
-	informer = &testInformer{SharedIndexInformer: cache.NewSharedIndexInformer(cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
+	informer = &testInformer{SharedIndexInformer: cache.NewSharedIndexInformer(&cache.ListWatch{
 		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 			return tracker.List(fakeGVR, fakeGVK, "")
 		},
 		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 			return tracker.Watch(fakeGVR, "")
 		},
-	}, tracker), &unstructured.Unstructured{}, 30*time.Second, nil)}
+	}, &unstructured.Unstructured{}, 30*time.Second, nil)}
 
 	reconciler := func(namespace, name string, newObj *unstructured.Unstructured) error {
 		var err error
@@ -147,10 +146,10 @@ func setupTest(ctx context.Context, customReconciler func(string, string, runtim
 		}
 	}
 
-	myController := generic.NewController(
-		generic.NewInformer[*unstructured.Unstructured](informer),
+	myController := NewController(
+		NewInformer[*unstructured.Unstructured](informer),
 		reconciler,
-		generic.ControllerOptions{},
+		ControllerOptions{},
 	)
 
 	verifyNoMoreEvents = func() bool {

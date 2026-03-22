@@ -17,6 +17,7 @@ limitations under the License.
 package options
 
 import (
+	"io/ioutil"
 	"net/http"
 	"os"
 	"reflect"
@@ -87,13 +88,13 @@ func TestToAuthenticationRequestHeaderConfig(t *testing.T) {
 
 func TestApplyToFallback(t *testing.T) {
 
-	f, err := os.CreateTemp("", "authkubeconfig")
+	f, err := ioutil.TempFile("", "authkubeconfig")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.Remove(f.Name())
 
-	if err := os.WriteFile(f.Name(), []byte(`
+	if err := ioutil.WriteFile(f.Name(), []byte(`
 apiVersion: v1
 kind: Config
 clusters:

@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
-	"slices"
 	"strings"
 	"testing"
 
@@ -32,11 +31,9 @@ import (
 	"k8s.io/apimachinery/pkg/conversion"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
-	"k8s.io/apiserver/pkg/validation"
-	"k8s.io/component-base/metrics/legacyregistry"
-	"k8s.io/component-base/metrics/testutil"
 	"k8s.io/klog/v2"
 )
 
@@ -73,7 +70,7 @@ func TestValidateDeclaratively(t *testing.T) {
 		object      runtime.Object
 		oldObject   runtime.Object
 		subresource string
-		options     []string
+		options     sets.Set[string]
 		expected    field.ErrorList
 	}{
 		{
@@ -110,7 +107,7 @@ func TestValidateDeclaratively(t *testing.T) {
 		},
 		{
 			name:     "update with option",
-			options:  []string{"option1"},
+			options:  sets.New("option1"),
 			object:   valid,
 			expected: field.ErrorList{invalidIfOptionErr},
 		},
@@ -125,12 +122,12 @@ func TestValidateDeclaratively(t *testing.T) {
 	scheme.AddKnownTypes(internalGV, &Pod{})
 	scheme.AddKnownTypes(v1GV, &v1.Pod{})
 
-	scheme.AddValidationFunc(&v1.Pod{}, func(ctx context.Context, op operation.Operation, object, oldObject any) field.ErrorList {
+	scheme.AddValidationFunc(&v1.Pod{}, func(ctx context.Context, op operation.Operation, object, oldObject interface{}, subresources ...string) field.ErrorList {
 		results := field.ErrorList{}
-		if op.HasOption("option1") {
+		if op.Options.Has("option1") {
 			results = append(results, invalidIfOptionErr)
 		}
-		if slices.Equal(op.Request.Subresources, []string{"status"}) {
+		if len(subresources) == 1 && subresources[0] == "status" {
 			results = append(results, invalidStatusErr)
 		}
 		if op.Type == operation.Update && object.(*v1.Pod).Spec.RestartPolicy != oldObject.(*v1.Pod).Spec.RestartPolicy {
@@ -162,16 +159,12 @@ func TestValidateDeclaratively(t *testing.T) {
 			Subresource: tc.subresource,
 		})
 		t.Run(tc.name, func(t *testing.T) {
-
-			cfg := &validationConfigOption{
-				options: tc.options,
-			}
+			var results field.ErrorList
 			if tc.oldObject == nil {
-				cfg.opType = operation.Create
+				results = ValidateDeclaratively(ctx, tc.options, scheme, tc.object)
 			} else {
-				cfg.opType = operation.Update
+				results = ValidateUpdateDeclaratively(ctx, tc.options, scheme, tc.object, tc.oldObject)
 			}
-			results := panicSafeValidateFunc(validateDeclaratively, cfg.takeover, cfg.validationIdentifier)(ctx, scheme, tc.object, tc.oldObject, cfg)
 			matcher := field.ErrorMatcher{}.ByType().ByField().ByOrigin()
 			matcher.Test(t, tc.expected, results)
 		})
@@ -213,7 +206,6 @@ func TestGatherDeclarativeValidationMismatches(t *testing.T) {
 	errB := field.Invalid(minReadySecondsPath, -1, "covered error B").WithOrigin("minimum")
 	coveredErrB := field.Invalid(minReadySecondsPath, -1, "covered error B").WithOrigin("minimum")
 	errBWithDiffDetail := field.Invalid(minReadySecondsPath, -1, "covered error B - different detail").WithOrigin("minimum")
-	errBWithDiffPath := field.Invalid(field.NewPath("spec").Child("fakeminReadySeconds"), -1, "covered error B").WithOrigin("minimum")
 	coveredErrB.CoveredByDeclarative = true
 	errC := field.Invalid(replicasPath, nil, "covered error C").WithOrigin("minimum")
 	coveredErrC := field.Invalid(replicasPath, nil, "covered error C").WithOrigin("minimum")
@@ -228,7 +220,6 @@ func TestGatherDeclarativeValidationMismatches(t *testing.T) {
 		takeover                bool
 		expectMismatches        bool
 		expectDetailsContaining []string
-		normalizedRules         []field.NormalizationRule
 	}{
 		{
 			name:                    "Declarative and imperative return 0 errors - no mismatch",
@@ -360,29 +351,11 @@ func TestGatherDeclarativeValidationMismatches(t *testing.T) {
 			expectMismatches:        false,
 			expectDetailsContaining: []string{},
 		},
-		{
-			name: "Field normalization, errors don't match - mismatch",
-			imperativeErrors: field.ErrorList{
-				coveredErrB,
-			},
-			declarativeErrors: field.ErrorList{
-				errBWithDiffPath,
-			},
-			normalizedRules: []field.NormalizationRule{
-				{
-					Regexp:      regexp.MustCompile(`spec.fakeminReadySeconds`),
-					Replacement: "spec.minReadySeconds",
-				},
-			},
-			takeover:                false,
-			expectMismatches:        false,
-			expectDetailsContaining: []string{},
-		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			details := gatherDeclarativeValidationMismatches(tc.imperativeErrors, tc.declarativeErrors, tc.takeover, tc.normalizedRules)
+			details := gatherDeclarativeValidationMismatches(tc.imperativeErrors, tc.declarativeErrors, tc.takeover)
 			// Check if mismatches were found if expected
 			if tc.expectMismatches && len(details) == 0 {
 				t.Errorf("Expected mismatches but got none")
@@ -449,7 +422,7 @@ func TestCompareDeclarativeErrorsAndEmitMismatches(t *testing.T) {
 			defer klog.LogToStderr(true)
 			ctx := context.Background()
 
-			compareDeclarativeErrorsAndEmitMismatches(ctx, tc.imperativeErrs, tc.declarativeErrs, tc.takeover, "test_validationIdentifier", nil)
+			CompareDeclarativeErrorsAndEmitMismatches(ctx, tc.imperativeErrs, tc.declarativeErrs, tc.takeover)
 
 			klog.Flush()
 			logOutput := buf.String()
@@ -472,19 +445,19 @@ func TestCompareDeclarativeErrorsAndEmitMismatches(t *testing.T) {
 func TestWithRecover(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
-	var options []string
+	options := sets.New[string]()
 	obj := &runtime.Unknown{}
 
 	testCases := []struct {
 		name            string
-		validateFn      func(context.Context, *runtime.Scheme, runtime.Object, runtime.Object, *validationConfigOption) field.ErrorList
+		validateFn      func(context.Context, sets.Set[string], *runtime.Scheme, runtime.Object) field.ErrorList
 		takeoverEnabled bool
 		wantErrs        field.ErrorList
 		expectLogRegex  string
 	}{
 		{
 			name: "no panic",
-			validateFn: func(context.Context, *runtime.Scheme, runtime.Object, runtime.Object, *validationConfigOption) field.ErrorList {
+			validateFn: func(context.Context, sets.Set[string], *runtime.Scheme, runtime.Object) field.ErrorList {
 				return field.ErrorList{
 					field.Invalid(field.NewPath("field"), "value", "reason"),
 				}
@@ -497,7 +470,7 @@ func TestWithRecover(t *testing.T) {
 		},
 		{
 			name: "panic with takeover disabled",
-			validateFn: func(context.Context, *runtime.Scheme, runtime.Object, runtime.Object, *validationConfigOption) field.ErrorList {
+			validateFn: func(context.Context, sets.Set[string], *runtime.Scheme, runtime.Object) field.ErrorList {
 				panic("test panic")
 			},
 			takeoverEnabled: false,
@@ -507,7 +480,7 @@ func TestWithRecover(t *testing.T) {
 		},
 		{
 			name: "panic with takeover enabled",
-			validateFn: func(context.Context, *runtime.Scheme, runtime.Object, runtime.Object, *validationConfigOption) field.ErrorList {
+			validateFn: func(context.Context, sets.Set[string], *runtime.Scheme, runtime.Object) field.ErrorList {
 				panic("test panic")
 			},
 			takeoverEnabled: true,
@@ -518,7 +491,7 @@ func TestWithRecover(t *testing.T) {
 		},
 		{
 			name: "nil return, no panic",
-			validateFn: func(context.Context, *runtime.Scheme, runtime.Object, runtime.Object, *validationConfigOption) field.ErrorList {
+			validateFn: func(context.Context, sets.Set[string], *runtime.Scheme, runtime.Object) field.ErrorList {
 				return nil
 			},
 			takeoverEnabled: false,
@@ -535,8 +508,8 @@ func TestWithRecover(t *testing.T) {
 			defer klog.LogToStderr(true)
 
 			// Pass the takeover flag to panicSafeValidateFunc instead of relying on the feature gate
-			wrapped := panicSafeValidateFunc(tc.validateFn, tc.takeoverEnabled, "test_validationIdentifier")
-			gotErrs := wrapped(ctx, scheme, obj, nil, &validationConfigOption{opType: operation.Create, options: options, takeover: tc.takeoverEnabled})
+			wrapped := panicSafeValidateFunc(tc.validateFn, tc.takeoverEnabled)
+			gotErrs := wrapped(ctx, options, scheme, obj)
 
 			klog.Flush()
 			logOutput := buf.String()
@@ -565,20 +538,20 @@ func TestWithRecover(t *testing.T) {
 func TestWithRecoverUpdate(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
-	var options []string
+	options := sets.New[string]()
 	obj := &runtime.Unknown{}
 	oldObj := &runtime.Unknown{}
 
 	testCases := []struct {
 		name            string
-		validateFn      func(context.Context, *runtime.Scheme, runtime.Object, runtime.Object, *validationConfigOption) field.ErrorList
+		validateFn      func(context.Context, sets.Set[string], *runtime.Scheme, runtime.Object, runtime.Object) field.ErrorList
 		takeoverEnabled bool
 		wantErrs        field.ErrorList
 		expectLogRegex  string
 	}{
 		{
 			name: "no panic",
-			validateFn: func(context.Context, *runtime.Scheme, runtime.Object, runtime.Object, *validationConfigOption) field.ErrorList {
+			validateFn: func(context.Context, sets.Set[string], *runtime.Scheme, runtime.Object, runtime.Object) field.ErrorList {
 				return field.ErrorList{
 					field.Invalid(field.NewPath("field"), "value", "reason"),
 				}
@@ -591,7 +564,7 @@ func TestWithRecoverUpdate(t *testing.T) {
 		},
 		{
 			name: "panic with takeover disabled",
-			validateFn: func(context.Context, *runtime.Scheme, runtime.Object, runtime.Object, *validationConfigOption) field.ErrorList {
+			validateFn: func(context.Context, sets.Set[string], *runtime.Scheme, runtime.Object, runtime.Object) field.ErrorList {
 				panic("test update panic")
 			},
 			takeoverEnabled: false,
@@ -601,7 +574,7 @@ func TestWithRecoverUpdate(t *testing.T) {
 		},
 		{
 			name: "panic with takeover enabled",
-			validateFn: func(context.Context, *runtime.Scheme, runtime.Object, runtime.Object, *validationConfigOption) field.ErrorList {
+			validateFn: func(context.Context, sets.Set[string], *runtime.Scheme, runtime.Object, runtime.Object) field.ErrorList {
 				panic("test update panic")
 			},
 			takeoverEnabled: true,
@@ -612,7 +585,7 @@ func TestWithRecoverUpdate(t *testing.T) {
 		},
 		{
 			name: "nil return, no panic",
-			validateFn: func(context.Context, *runtime.Scheme, runtime.Object, runtime.Object, *validationConfigOption) field.ErrorList {
+			validateFn: func(context.Context, sets.Set[string], *runtime.Scheme, runtime.Object, runtime.Object) field.ErrorList {
 				return nil
 			},
 			takeoverEnabled: false,
@@ -629,8 +602,8 @@ func TestWithRecoverUpdate(t *testing.T) {
 			defer klog.LogToStderr(true)
 
 			// Pass the takeover flag to panicSafeValidateUpdateFunc instead of relying on the feature gate
-			wrapped := panicSafeValidateFunc(tc.validateFn, tc.takeoverEnabled, "test_validationIdentifier")
-			gotErrs := wrapped(ctx, scheme, obj, oldObj, &validationConfigOption{opType: operation.Update, options: options, takeover: tc.takeoverEnabled})
+			wrapped := panicSafeValidateUpdateFunc(tc.validateFn, tc.takeoverEnabled)
+			gotErrs := wrapped(ctx, options, scheme, obj, oldObj)
 
 			klog.Flush()
 			logOutput := buf.String()
@@ -656,69 +629,53 @@ func TestWithRecoverUpdate(t *testing.T) {
 	}
 }
 
-func TestRecordDuplicateValidationErrors(t *testing.T) {
+func TestValidateDeclarativelyWithRecovery(t *testing.T) {
 	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	options := sets.New[string]()
+	obj := &runtime.Unknown{}
 
-	testCases := []struct {
-		name           string
-		qualifiedKind  schema.GroupKind
-		errs           field.ErrorList
-		expectedMetric string
-	}{
-		{
-			name:          "detect duplicates and increment metric",
-			qualifiedKind: schema.GroupKind{Group: "apps", Kind: "ReplicaSet"},
-			errs: field.ErrorList{
-				field.Invalid(field.NewPath("spec").Child("replicas"), -1, "must be greater than or equal to 0").WithOrigin("minimum"),
-				field.Invalid(field.NewPath("spec").Child("replicas"), -1, "must be greater than or equal to 0").WithOrigin("minimum"),
-				field.Invalid(field.NewPath("spec").Child("selector"), &metav1.LabelSelector{MatchLabels: map[string]string{}, MatchExpressions: []metav1.LabelSelectorRequirement{}}, "empty selector is invalid for deployment"),
-				field.Invalid(field.NewPath("spec").Child("selector"), &metav1.LabelSelector{MatchLabels: map[string]string{}, MatchExpressions: []metav1.LabelSelectorRequirement{}}, "empty selector is invalid for deployment"),
-			},
-			expectedMetric: `
-			# HELP apiserver_validation_duplicate_validation_error_total [INTERNAL] Number of duplicate validation errors during validation.
-			# TYPE apiserver_validation_duplicate_validation_error_total counter
-			apiserver_validation_duplicate_validation_error_total 2
-			`,
-		},
-		{
-			name:          "detect duplicates with all fields but origin being equal",
-			qualifiedKind: schema.GroupKind{Group: "apps", Kind: "ReplicaSet"},
-			errs: field.ErrorList{
-				field.Invalid(field.NewPath("spec").Child("replicas"), -1, "must be greater than or equal to 0").WithOrigin("minimum"),
-				field.Invalid(field.NewPath("spec").Child("replicas"), -1, "must be greater than or equal to 0").WithOrigin("min"),
-			},
-			expectedMetric: `
-			# HELP apiserver_validation_duplicate_validation_error_total [INTERNAL] Number of duplicate validation errors during validation.
-			# TYPE apiserver_validation_duplicate_validation_error_total counter
-			apiserver_validation_duplicate_validation_error_total 1
-			`,
-		},
-		{
-			name:          "no duplicates",
-			qualifiedKind: schema.GroupKind{Group: "apps", Kind: "ReplicaSet"},
-			errs: field.ErrorList{
-				field.Invalid(field.NewPath("spec").Child("replicas"), -1, "must be greater than or equal to 0").WithOrigin("minimum"),
-				field.Invalid(field.NewPath("spec").Child("selector"), &metav1.LabelSelector{MatchLabels: map[string]string{}, MatchExpressions: []metav1.LabelSelectorRequirement{}}, "empty selector is invalid for deployment"),
-			},
-			expectedMetric: `
-			# HELP apiserver_validation_duplicate_validation_error_total [INTERNAL] Number of duplicate validation errors during validation.
-			# TYPE apiserver_validation_duplicate_validation_error_total counter
-			apiserver_validation_duplicate_validation_error_total 0
-			`,
-		},
-	}
+	// Simple test for the ValidateDeclarativelyWithRecovery function
+	t.Run("with takeover disabled", func(t *testing.T) {
+		errs := ValidateDeclarativelyWithRecovery(ctx, options, scheme, obj, false)
+		if errs == nil {
+			// This is expected to error since the request info is missing
+			t.Errorf("Expected errors but got nil")
+		}
+	})
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			defer legacyregistry.Reset()
-			defer validation.ResetValidationMetricsInstance()
-			RecordDuplicateValidationErrors(ctx, tc.qualifiedKind, tc.errs)
+	t.Run("with takeover enabled", func(t *testing.T) {
+		errs := ValidateDeclarativelyWithRecovery(ctx, options, scheme, obj, true)
+		if errs == nil {
+			// This is expected to error since the request info is missing
+			t.Errorf("Expected errors but got nil")
+		}
+	})
+}
 
-			if err := testutil.GatherAndCompare(legacyregistry.DefaultGatherer, strings.NewReader(tc.expectedMetric), "apiserver_validation_duplicate_validation_error_total"); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
+func TestValidateUpdateDeclarativelyWithRecovery(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	options := sets.New[string]()
+	obj := &runtime.Unknown{}
+	oldObj := &runtime.Unknown{}
+
+	// Simple test for the ValidateUpdateDeclarativelyWithRecovery function
+	t.Run("with takeover disabled", func(t *testing.T) {
+		errs := ValidateUpdateDeclarativelyWithRecovery(ctx, options, scheme, obj, oldObj, false)
+		if errs == nil {
+			// This is expected to error since the request info is missing
+			t.Errorf("Expected errors but got nil")
+		}
+	})
+
+	t.Run("with takeover enabled", func(t *testing.T) {
+		errs := ValidateUpdateDeclarativelyWithRecovery(ctx, options, scheme, obj, oldObj, true)
+		if errs == nil {
+			// This is expected to error since the request info is missing
+			t.Errorf("Expected errors but got nil")
+		}
+	})
 }
 
 func equalErrorLists(a, b field.ErrorList) bool {
@@ -732,94 +689,4 @@ func equalErrorLists(a, b field.ErrorList) bool {
 	}
 	// Both non-nil: do a normal DeepEqual
 	return reflect.DeepEqual(a, b)
-}
-
-func TestMetricIdentifier(t *testing.T) {
-	scheme := runtime.NewScheme()
-	scheme.AddKnownTypes(schema.GroupVersion{Version: "v1"}, &v1.Pod{})
-
-	testCases := []struct {
-		name        string
-		opType      operation.Type
-		obj         runtime.Object
-		scheme      *runtime.Scheme
-		subresource string
-		expected    string
-		expectErr   bool
-	}{
-		{
-			name:        "with subresource",
-			opType:      operation.Create,
-			obj:         &v1.Pod{TypeMeta: metav1.TypeMeta{Kind: "Pod"}},
-			scheme:      scheme,
-			subresource: "status",
-			expected:    "pod_status_create",
-			expectErr:   false,
-		},
-		{
-			name:      "without subresource",
-			opType:    operation.Update,
-			obj:       &v1.Pod{TypeMeta: metav1.TypeMeta{Kind: "Pod"}},
-			scheme:    scheme,
-			expected:  "pod_update",
-			expectErr: false,
-		},
-		{
-			name:      "unknown operation",
-			opType:    3, // not a valid operation.Type
-			obj:       &v1.Pod{TypeMeta: metav1.TypeMeta{Kind: "Pod"}},
-			scheme:    scheme,
-			expected:  "pod_unknown_op",
-			expectErr: true,
-		},
-		{
-			name:      "no request info and no kind",
-			opType:    operation.Create,
-			obj:       nil,
-			expected:  "unknown_resource_create",
-			expectErr: true,
-		},
-		{
-			name:      "known type without kind",
-			opType:    operation.Update,
-			obj:       &v1.Pod{},
-			scheme:    scheme,
-			expected:  "pod_update",
-			expectErr: false,
-		},
-		{
-			name:      "unknown type with scheme",
-			opType:    operation.Create,
-			obj:       &runtime.Unknown{}, // Not registered in the scheme
-			scheme:    scheme,
-			expected:  "unknown_resource_create",
-			expectErr: true,
-		},
-		{
-			name:      "unknown type without scheme",
-			opType:    operation.Type(4),
-			obj:       &runtime.Unknown{}, // Not registered in the scheme
-			expected:  "unknown_resource_unknown_op",
-			expectErr: true,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			if tc.obj != nil {
-				ctx = genericapirequest.WithRequestInfo(ctx, &genericapirequest.RequestInfo{
-					Subresource: tc.subresource,
-				})
-			}
-
-			result, err := metricIdentifier(ctx, tc.scheme, tc.obj, tc.opType)
-			if (err != nil) != tc.expectErr {
-				t.Errorf("expected error: %v, got: %v", tc.expectErr, err)
-			}
-			if result != tc.expected {
-				t.Errorf("expected: %s, got: %s", tc.expected, result)
-			}
-		})
-	}
 }

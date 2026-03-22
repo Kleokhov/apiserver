@@ -59,11 +59,14 @@ type serverInfo struct {
 	expectEndpoint string
 }
 
-func NewFakePeerEndpointReconciler(t *testing.T, baseKey string, s storage.Interface) peerEndpointLeaseReconciler {
+func NewFakePeerEndpointReconciler(t *testing.T, s storage.Interface) peerEndpointLeaseReconciler {
+	// use the same base key used by the controlplane, but add a random
+	// prefix so we can reuse the etcd instance for subtests independently.
+	base := "/" + uuid.New().String() + "/peerserverleases/"
 	return peerEndpointLeaseReconciler{serverLeases: &peerEndpointLeases{
 		storage:   s,
 		destroyFn: func() {},
-		baseKey:   baseKey,
+		baseKey:   base,
 		leaseTime: 1 * time.Minute, // avoid the lease to timeout on tests
 	}}
 }
@@ -79,10 +82,8 @@ func (f *peerEndpointLeaseReconciler) SetKeys(servers []serverInfo) error {
 
 func TestPeerEndpointLeaseReconciler(t *testing.T) {
 	// enable feature flags
-	featuregatetesting.SetFeatureGatesDuringTest(t, utilfeature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
-		features.APIServerIdentity: true,
-		features.StorageVersionAPI: true,
-	})
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.APIServerIdentity, true)
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.StorageVersionAPI, true)
 
 	server, sc := etcd3testing.NewUnsecuredEtcd3TestClientServer(t)
 	t.Cleanup(func() { server.Terminate(t) })
@@ -90,6 +91,12 @@ func TestPeerEndpointLeaseReconciler(t *testing.T) {
 	newFunc := func() runtime.Object { return &corev1.Endpoints{} }
 	newListFunc := func() runtime.Object { return &corev1.EndpointsList{} }
 	sc.Codec = apitesting.TestStorageCodec(codecs, corev1.SchemeGroupVersion)
+
+	s, dFunc, err := factory.Create(*sc.ForResource(schema.GroupResource{Resource: "endpoints"}), newFunc, newListFunc, "")
+	if err != nil {
+		t.Fatalf("Error creating storage: %v", err)
+	}
+	t.Cleanup(dFunc)
 
 	tests := []struct {
 		testName     string
@@ -141,17 +148,8 @@ func TestPeerEndpointLeaseReconciler(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.testName, func(t *testing.T) {
-			// use the same base key used by the controlplane, but add a random
-			// prefix so we can reuse the etcd instance for subtests independently.
-			baseKey := "/" + uuid.New().String() + "/peerserverleases/"
-			s, dFunc, err := factory.Create(*sc.ForResource(schema.GroupResource{Resource: "endpoints"}), newFunc, newListFunc, baseKey)
-			if err != nil {
-				t.Fatalf("Error creating storage: %v", err)
-			}
-			t.Cleanup(dFunc)
-
-			fakeReconciler := NewFakePeerEndpointReconciler(t, baseKey, s)
-			err = fakeReconciler.SetKeys(test.servers)
+			fakeReconciler := NewFakePeerEndpointReconciler(t, s)
+			err := fakeReconciler.SetKeys(test.servers)
 			if err != nil {
 				t.Errorf("unexpected error creating keys: %v", err)
 			}
@@ -191,10 +189,8 @@ func TestPeerEndpointLeaseReconciler(t *testing.T) {
 
 func TestPeerLeaseRemoveEndpoints(t *testing.T) {
 	// enable feature flags
-	featuregatetesting.SetFeatureGatesDuringTest(t, utilfeature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
-		features.APIServerIdentity: true,
-		features.StorageVersionAPI: true,
-	})
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.APIServerIdentity, true)
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.StorageVersionAPI, true)
 
 	server, sc := etcd3testing.NewUnsecuredEtcd3TestClientServer(t)
 	t.Cleanup(func() { server.Terminate(t) })
@@ -202,6 +198,12 @@ func TestPeerLeaseRemoveEndpoints(t *testing.T) {
 	newFunc := func() runtime.Object { return &corev1.Endpoints{} }
 	newListFunc := func() runtime.Object { return &corev1.EndpointsList{} }
 	sc.Codec = apitesting.TestStorageCodec(codecs, corev1.SchemeGroupVersion)
+
+	s, dFunc, err := factory.Create(*sc.ForResource(schema.GroupResource{Resource: "pods"}), newFunc, newListFunc, "")
+	if err != nil {
+		t.Fatalf("Error creating storage: %v", err)
+	}
+	t.Cleanup(dFunc)
 
 	stopTests := []struct {
 		testName         string
@@ -245,17 +247,8 @@ func TestPeerLeaseRemoveEndpoints(t *testing.T) {
 	}
 	for _, test := range stopTests {
 		t.Run(test.testName, func(t *testing.T) {
-			// use the same base key used by the controlplane, but add a random
-			// prefix so we can reuse the etcd instance for subtests independently.
-			baseKey := "/" + uuid.New().String() + "/peerserverleases/"
-			s, dFunc, err := factory.Create(*sc.ForResource(schema.GroupResource{Resource: "pods"}), newFunc, newListFunc, baseKey)
-			if err != nil {
-				t.Fatalf("Error creating storage: %v", err)
-			}
-			t.Cleanup(dFunc)
-
-			fakeReconciler := NewFakePeerEndpointReconciler(t, baseKey, s)
-			err = fakeReconciler.SetKeys(test.servers)
+			fakeReconciler := NewFakePeerEndpointReconciler(t, s)
+			err := fakeReconciler.SetKeys(test.servers)
 			if err != nil {
 				t.Errorf("unexpected error creating keys: %v", err)
 			}

@@ -28,6 +28,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"math/big"
 	"net"
 	"os"
@@ -404,13 +405,13 @@ func getOrCreateTestCertFiles(certFileName, keyFileName string, spec TestCertSpe
 	}
 
 	os.MkdirAll(filepath.Dir(certFileName), os.FileMode(0755))
-	err = os.WriteFile(certFileName, certPem, os.FileMode(0755))
+	err = ioutil.WriteFile(certFileName, certPem, os.FileMode(0755))
 	if err != nil {
 		return err
 	}
 
 	os.MkdirAll(filepath.Dir(keyFileName), os.FileMode(0755))
-	err = os.WriteFile(keyFileName, keyPem, os.FileMode(0755))
+	err = ioutil.WriteFile(keyFileName, keyPem, os.FileMode(0755))
 	if err != nil {
 		return err
 	}
@@ -419,7 +420,7 @@ func getOrCreateTestCertFiles(certFileName, keyFileName string, spec TestCertSpe
 }
 
 func caCertFromBundle(bundlePath string) (*x509.Certificate, error) {
-	pemData, err := os.ReadFile(bundlePath)
+	pemData, err := ioutil.ReadFile(bundlePath)
 	if err != nil {
 		return nil, err
 	}

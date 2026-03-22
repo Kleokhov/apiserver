@@ -19,17 +19,18 @@ package filters
 import (
 	"context"
 	"errors"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
+	genericfeatures "k8s.io/apiserver/pkg/features"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
 
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/selection"
-
 	"github.com/stretchr/testify/assert"
-
 	batch "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -45,12 +46,13 @@ func TestGetAuthorizerAttributes(t *testing.T) {
 	}
 
 	testcases := map[string]struct {
-		Verb               string
-		Path               string
-		ExpectedAttributes *authorizer.AttributesRecord
+		Verb                        string
+		Path                        string
+		ExpectedAttributes          *authorizer.AttributesRecord
+		EnableAuthorizationSelector bool
 	}{
 		"non-resource root": {
-			Verb: http.MethodPost,
+			Verb: "POST",
 			Path: "/",
 			ExpectedAttributes: &authorizer.AttributesRecord{
 				Verb: "post",
@@ -58,7 +60,7 @@ func TestGetAuthorizerAttributes(t *testing.T) {
 			},
 		},
 		"non-resource api prefix": {
-			Verb: http.MethodGet,
+			Verb: "GET",
 			Path: "/api/",
 			ExpectedAttributes: &authorizer.AttributesRecord{
 				Verb: "get",
@@ -66,7 +68,7 @@ func TestGetAuthorizerAttributes(t *testing.T) {
 			},
 		},
 		"non-resource group api prefix": {
-			Verb: http.MethodGet,
+			Verb: "GET",
 			Path: "/apis/extensions/",
 			ExpectedAttributes: &authorizer.AttributesRecord{
 				Verb: "get",
@@ -75,7 +77,7 @@ func TestGetAuthorizerAttributes(t *testing.T) {
 		},
 
 		"resource": {
-			Verb: http.MethodPost,
+			Verb: "POST",
 			Path: "/api/v1/nodes/mynode",
 			ExpectedAttributes: &authorizer.AttributesRecord{
 				Verb:            "create",
@@ -87,7 +89,7 @@ func TestGetAuthorizerAttributes(t *testing.T) {
 			},
 		},
 		"namespaced resource": {
-			Verb: http.MethodPut,
+			Verb: "PUT",
 			Path: "/api/v1/namespaces/myns/pods/mypod",
 			ExpectedAttributes: &authorizer.AttributesRecord{
 				Verb:            "update",
@@ -100,7 +102,7 @@ func TestGetAuthorizerAttributes(t *testing.T) {
 			},
 		},
 		"API group resource": {
-			Verb: http.MethodGet,
+			Verb: "GET",
 			Path: "/apis/batch/v1/namespaces/myns/jobs",
 			ExpectedAttributes: &authorizer.AttributesRecord{
 				Verb:            "list",
@@ -113,7 +115,7 @@ func TestGetAuthorizerAttributes(t *testing.T) {
 			},
 		},
 		"disabled, ignore good field selector": {
-			Verb: http.MethodGet,
+			Verb: "GET",
 			Path: "/apis/batch/v1/namespaces/myns/jobs?fieldSelector%=foo%3Dbar",
 			ExpectedAttributes: &authorizer.AttributesRecord{
 				Verb:            "list",
@@ -126,7 +128,7 @@ func TestGetAuthorizerAttributes(t *testing.T) {
 			},
 		},
 		"enabled, good field selector": {
-			Verb: http.MethodGet,
+			Verb: "GET",
 			Path: "/apis/batch/v1/namespaces/myns/jobs?fieldSelector=foo%3D%3Dbar",
 			ExpectedAttributes: &authorizer.AttributesRecord{
 				Verb:            "list",
@@ -140,9 +142,10 @@ func TestGetAuthorizerAttributes(t *testing.T) {
 					fields.OneTermEqualSelector("foo", "bar").Requirements()[0],
 				},
 			},
+			EnableAuthorizationSelector: true,
 		},
 		"enabled, bad field selector": {
-			Verb: http.MethodGet,
+			Verb: "GET",
 			Path: "/apis/batch/v1/namespaces/myns/jobs?fieldSelector=%2Abar",
 			ExpectedAttributes: &authorizer.AttributesRecord{
 				Verb:                    "list",
@@ -154,9 +157,10 @@ func TestGetAuthorizerAttributes(t *testing.T) {
 				Resource:                "jobs",
 				FieldSelectorParsingErr: errors.New("invalid selector: '*bar'; can't understand '*bar'"),
 			},
+			EnableAuthorizationSelector: true,
 		},
 		"disabled, ignore good label selector": {
-			Verb: http.MethodGet,
+			Verb: "GET",
 			Path: "/apis/batch/v1/namespaces/myns/jobs?labelSelector%=foo%3Dbar",
 			ExpectedAttributes: &authorizer.AttributesRecord{
 				Verb:            "list",
@@ -169,7 +173,7 @@ func TestGetAuthorizerAttributes(t *testing.T) {
 			},
 		},
 		"enabled, good label selector": {
-			Verb: http.MethodGet,
+			Verb: "GET",
 			Path: "/apis/batch/v1/namespaces/myns/jobs?labelSelector=foo%3D%3Dbar",
 			ExpectedAttributes: &authorizer.AttributesRecord{
 				Verb:            "list",
@@ -183,9 +187,10 @@ func TestGetAuthorizerAttributes(t *testing.T) {
 					*basicLabelRequirement,
 				},
 			},
+			EnableAuthorizationSelector: true,
 		},
 		"enabled, bad label selector": {
-			Verb: http.MethodGet,
+			Verb: "GET",
 			Path: "/apis/batch/v1/namespaces/myns/jobs?labelSelector=%2Abar",
 			ExpectedAttributes: &authorizer.AttributesRecord{
 				Verb:                    "list",
@@ -197,14 +202,17 @@ func TestGetAuthorizerAttributes(t *testing.T) {
 				Resource:                "jobs",
 				LabelSelectorParsingErr: errors.New("unable to parse requirement: <nil>: Invalid value: \"*bar\": name part must consist of alphanumeric characters, '-', '_' or '.', and must start and end with an alphanumeric character (e.g. 'MyName',  or 'my.name',  or '123-abc', regex used for validation is '([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]')"),
 			},
+			EnableAuthorizationSelector: true,
 		},
 	}
 
 	for k, tc := range testcases {
 		t.Run(k, func(t *testing.T) {
-			ctx := t.Context()
+			if tc.EnableAuthorizationSelector {
+				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, genericfeatures.AuthorizeWithSelectors, true)
+			}
 
-			req, _ := http.NewRequestWithContext(ctx, tc.Verb, tc.Path, nil)
+			req, _ := http.NewRequest(tc.Verb, tc.Path, nil)
 			req.RemoteAddr = "127.0.0.1"
 
 			var attribs authorizer.Attributes
@@ -273,27 +281,16 @@ func TestAuditAnnotation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	negotiatedSerializer := serializer.NewCodecFactory(scheme).WithoutConversion()
 	for k, tc := range testcases {
-		ctx := t.Context()
 		handler := WithAuthorization(&fakeHTTPHandler{}, tc.authorizer, negotiatedSerializer)
 		// TODO: fake audit injector
 
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "/api/v1/namespaces/default/pods", nil)
+		req, _ := http.NewRequest("GET", "/api/v1/namespaces/default/pods", nil)
 		req = withTestContext(req, nil, &auditinternal.Event{Level: auditinternal.LevelMetadata})
-		ae := audit.AuditContextFrom(req.Context())
+		ae := audit.AuditEventFrom(req.Context())
 		req.RemoteAddr = "127.0.0.1"
 		handler.ServeHTTP(httptest.NewRecorder(), req)
-
-		var annotation string
-		var ok bool
-		if len(tc.decisionAnnotation) > 0 {
-			annotation, ok = ae.GetEventAnnotation(decisionAnnotationKey)
-			assert.True(t, ok, k+": decision annotation not found")
-			assert.Equal(t, tc.decisionAnnotation, annotation, k+": unexpected decision annotation")
-		}
-
-		annotation, ok = ae.GetEventAnnotation(reasonAnnotationKey)
-		assert.True(t, ok, k+": reason annotation not found")
-		assert.Equal(t, tc.reasonAnnotation, annotation, k+": unexpected reason annotation")
+		assert.Equal(t, tc.decisionAnnotation, ae.Annotations[decisionAnnotationKey], k+": unexpected decision annotation")
+		assert.Equal(t, tc.reasonAnnotation, ae.Annotations[reasonAnnotationKey], k+": unexpected reason annotation")
 	}
 
 }

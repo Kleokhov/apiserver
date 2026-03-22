@@ -3,16 +3,13 @@ package dynamo
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"path"
 	"reflect"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -78,28 +75,6 @@ type objState struct {
 
 var _ storage.Interface = (*store)(nil)
 
-// NewFromAWSConfig loads AWS config, creates a DynamoDB client, ensures the resource table,
-// initializes the meta row, and returns a store.
-func NewFromAWSConfig(
-	ctx context.Context,
-	awsRegion string,
-	tableName string,
-	prefix string,
-	resourcePrefix string,
-	groupResource schema.GroupResource,
-	versioner storage.Versioner,
-	transformer value.Transformer,
-	decoder Decoder,
-	codec runtime.Codec,
-) (*store, error) {
-	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(awsRegion))
-	if err != nil {
-		return nil, fmt.Errorf("load AWS config: %w", err)
-	}
-	ddb := dynamodb.NewFromConfig(cfg)
-	return New(ctx, ddb, tableName, prefix, resourcePrefix, groupResource, versioner, transformer, decoder, codec, true)
-}
-
 // New constructs a DynamoDB store for one resource table.
 // If bootstrap==true, it will CreateTable (if missing), enable TTL best-effort, and create the meta row.
 func New(
@@ -120,7 +95,13 @@ func New(
 		pathPrefix += "/"
 	}
 	if resourcePrefix == "" || resourcePrefix == "/" {
-		return nil, fmt.Errorf("invalid resource prefix: %q", resourcePrefix)
+		// Derive something stable so we don't crash on synthetic/internal resources.
+		// groupResource.String() is e.g. "apiServerIPInfo" or "endpoints".
+		gr := groupResource.String()
+		if gr == "" {
+			gr = "unknown"
+		}
+		resourcePrefix = "/" + gr
 	}
 	if !strings.HasPrefix(resourcePrefix, "/") {
 		return nil, fmt.Errorf("resourcePrefix needs to start from /")
@@ -139,90 +120,13 @@ func New(
 	}
 
 	if bootstrap {
-		if err := EnsureResourceTable(ctx, ddb, tableName); err != nil {
+		if err := EnsureTableBootstrap(ctx, ddb, tableName); err != nil {
 			return nil, err
 		}
-		if err := ensureMetaRow(ctx, ddb, tableName); err != nil {
-			return nil, err
-		}
+		fmt.Printf("DynamoDB storage backend bootstrapped for table: %s\n", tableName)
 	}
 
 	return s, nil
-}
-
-// EnsureResourceTable creates the per-resource table if it does not exist.
-// It also enables TTL on attribute "ttl" best-effort (ignores errors that indicate it's already set).
-func EnsureResourceTable(ctx context.Context, ddb *dynamodb.Client, tableName string) error {
-	// Fast path: already exists.
-	_, err := ddb.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(tableName)})
-	if err == nil {
-		return nil
-	}
-	var rnfe *ddbtypes.ResourceNotFoundException
-	if !errors.As(err, &rnfe) {
-		return fmt.Errorf("DescribeTable(%s): %w", tableName, err)
-	}
-
-	_, err = ddb.CreateTable(ctx, &dynamodb.CreateTableInput{
-		TableName:   aws.String(tableName),
-		BillingMode: ddbtypes.BillingModePayPerRequest,
-		AttributeDefinitions: []ddbtypes.AttributeDefinition{
-			{AttributeName: aws.String(attrPK), AttributeType: ddbtypes.ScalarAttributeTypeS},
-			{AttributeName: aws.String(attrSK), AttributeType: ddbtypes.ScalarAttributeTypeS},
-		},
-		KeySchema: []ddbtypes.KeySchemaElement{
-			{AttributeName: aws.String(attrPK), KeyType: ddbtypes.KeyTypeHash},
-			{AttributeName: aws.String(attrSK), KeyType: ddbtypes.KeyTypeRange},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("CreateTable(%s): %w", tableName, err)
-	}
-
-	waiter := dynamodb.NewTableExistsWaiter(ddb)
-	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-	if err := waiter.Wait(waitCtx, &dynamodb.DescribeTableInput{TableName: aws.String(tableName)}, 15*time.Second); err != nil {
-		return fmt.Errorf("wait for table %s to exist: %w", tableName, err)
-	}
-
-	// TODO: double-check TTL expiration
-	// Best-effort TTL enablement (safe to ignore failures if permissions not granted).
-	_, _ = ddb.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
-		TableName: aws.String(tableName),
-		TimeToLiveSpecification: &ddbtypes.TimeToLiveSpecification{
-			AttributeName: aws.String(ttlAttribute),
-			Enabled:       aws.Bool(true),
-		},
-	})
-
-	return nil
-}
-
-// ensureMetaRow creates the meta row if it doesn't exist.
-func ensureMetaRow(ctx context.Context, ddb *dynamodb.Client, tableName string) error {
-	// Create meta row if it doesn't exist.
-	_, err := ddb.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: aws.String(tableName),
-		Item: map[string]ddbtypes.AttributeValue{
-			attrPK:        &ddbtypes.AttributeValueMemberS{Value: metaPK},
-			attrSK:        &ddbtypes.AttributeValueMemberS{Value: metaSK},
-			attrCurrentRV: &ddbtypes.AttributeValueMemberN{Value: strconv.FormatUint(minInitialRV, 10)},
-		},
-		ConditionExpression: aws.String("attribute_not_exists(#pk)"),
-		ExpressionAttributeNames: map[string]string{
-			"#pk": attrPK,
-		},
-	})
-	if err == nil {
-		return nil
-	}
-	var cfe *ddbtypes.ConditionalCheckFailedException
-	if errors.As(err, &cfe) {
-		// already exists
-		return nil
-	}
-	return fmt.Errorf("PutItem(meta row) table=%s: %w", tableName, err)
 }
 
 // validateMinimumResourceVersion returns a 'too large resource' version error when the provided minimumResourceVersion is
@@ -335,9 +239,20 @@ func (s *store) updateState(st *objState, userUpdate storage.UpdateFunc) (runtim
 }
 
 func (s *store) prepareKey(key string, recursive bool) (string, error) {
-	key, err := storage.PrepareKey(s.resourcePrefix, key, recursive)
-	if err != nil {
-		return "", err
+	if key == ".." ||
+		strings.HasPrefix(key, "../") ||
+		strings.HasSuffix(key, "/..") ||
+		strings.Contains(key, "/../") {
+		return "", fmt.Errorf("invalid key: %q", key)
+	}
+	if key == "." ||
+		strings.HasPrefix(key, "./") ||
+		strings.HasSuffix(key, "/.") ||
+		strings.Contains(key, "/./") {
+		return "", fmt.Errorf("invalid key: %q", key)
+	}
+	if key == "" || key == "/" {
+		return "", fmt.Errorf("empty key: %q", key)
 	}
 	// We ensured that pathPrefix ends in '/' in construction, so skip any leading '/' in the key now.
 	startIndex := 0
@@ -1220,23 +1135,7 @@ func (s *store) Watch(ctx context.Context, key string, opts storage.ListOptions)
 		return nil, apierrors.NewMethodNotSupported(s.groupResource, "watchlist/sendInitialEvents")
 	}
 
-	// No-op watch: never produces events, but doesn't error.
-	// Keeps informers from crashing the server during bring-up.
-	fw := watch.NewRaceFreeFake()
-
-	go func() {
-		<-ctx.Done()
-		fw.Stop()
-	}()
-
-	return fw, nil
-}
-
-// Stats implements storage.Interface.Stats.
-func (s *store) Stats(ctx context.Context) (storage.Stats, error) {
-	return storage.Stats{
-		ObjectCount: -1,
-	}, nil
+	return nil, apierrors.NewMethodNotSupported(s.groupResource, "watch")
 }
 
 // ReadinessCheck implements storage.Interface.ReadinessCheck.
@@ -1254,12 +1153,55 @@ func (s *store) GetCurrentResourceVersion(ctx context.Context) (uint64, error) {
 	return 1, fmt.Errorf("not Implemented")
 }
 
-// EnableResourceSizeEstimation implements storage.Interface.EnableResourceSizeEstimation.
-func (s *store) EnableResourceSizeEstimation(getKeys storage.KeysFunc) error {
-	return nil
-}
-
 // CompactRevision implements storage.Interface.CompactRevision.
 func (s *store) CompactRevision() int64 {
 	return 0
+}
+
+func (s *store) Count(key string) (int64, error) {
+	preparedKey, err := s.prepareKey(key, true)
+	if err != nil {
+		return 0, err
+	}
+
+	// Extra safety (matches etcd-store behavior too):
+	// ensure "/a" doesn't also count "/ab".
+	if !strings.HasSuffix(preparedKey, "/") {
+		preparedKey += "/"
+	}
+
+	ctx := context.Background()
+
+	var total int64
+	var exclusiveStartKey map[string]ddbtypes.AttributeValue
+
+	for {
+		resp, err := s.ddb.Query(ctx, &dynamodb.QueryInput{
+			TableName:              aws.String(s.tableName),
+			ConsistentRead:         aws.Bool(true), // closest to etcd linearizable reads
+			KeyConditionExpression: aws.String("#pk = :pk AND begins_with(#sk, :prefix)"),
+			ExpressionAttributeNames: map[string]string{
+				"#pk": attrPK,
+				"#sk": attrSK,
+			},
+			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+				":pk":     &ddbtypes.AttributeValueMemberS{Value: pkV1Constant},
+				":prefix": &ddbtypes.AttributeValueMemberS{Value: preparedKey},
+			},
+			Select:            ddbtypes.SelectCount,
+			ExclusiveStartKey: exclusiveStartKey,
+		})
+		if err != nil {
+			return 0, storage.NewInternalError(fmt.Errorf("QueryCount(prefix=%q): %w", preparedKey, err))
+		}
+
+		total += int64(resp.Count)
+
+		if resp.LastEvaluatedKey == nil || len(resp.LastEvaluatedKey) == 0 {
+			break
+		}
+		exclusiveStartKey = resp.LastEvaluatedKey
+	}
+
+	return total, nil
 }

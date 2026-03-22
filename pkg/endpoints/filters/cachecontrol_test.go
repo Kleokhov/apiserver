@@ -50,13 +50,12 @@ func TestCacheControl(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ctx := t.Context()
 			handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 				//do nothing
 			})
 			wrapped := WithCacheControl(handler)
 
-			testRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, test.path, nil)
+			testRequest, err := http.NewRequest(http.MethodGet, test.path, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

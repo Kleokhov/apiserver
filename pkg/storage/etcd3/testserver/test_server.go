@@ -32,7 +32,6 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
 	"google.golang.org/grpc"
-	storagetesting "k8s.io/apiserver/pkg/storage/testing"
 )
 
 // getAvailablePort returns a TCP port that is available for binding.
@@ -130,7 +129,5 @@ func RunEtcd(t testing.TB, cfg *embed.Config) *kubernetes.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.KV = storagetesting.NewKVRecorder(client.KV)
-	client.Kubernetes = storagetesting.NewKubernetesRecorder(client.Kubernetes)
 	return client
 }

@@ -42,7 +42,6 @@ import (
 	"k8s.io/component-base/metrics/legacyregistry"
 	"k8s.io/component-base/metrics/testutil"
 
-	apidiscoveryv2 "k8s.io/api/apidiscovery/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -78,7 +77,7 @@ func TestPeerProxy(t *testing.T) {
 		peerproxiedHeader    string
 		reconcilerConfig     reconciler
 		localCache           map[schema.GroupVersionResource]bool
-		peerCache            map[string]PeerDiscoveryCacheEntry
+		peerCache            map[string]map[schema.GroupVersionResource]bool
 		wantStatus           int
 		wantMetricsData      string
 	}{
@@ -103,7 +102,7 @@ func TestPeerProxy(t *testing.T) {
 			desc:        "Serve locally if serviceable",
 			requestPath: "/api/foo/bar",
 			localCache: map[schema.GroupVersionResource]bool{
-				{Group: "", Version: "foo", Resource: "bar"}: true,
+				{Group: "core", Version: "foo", Resource: "bar"}: true,
 			},
 			wantStatus: http.StatusOK,
 		},
@@ -117,11 +116,9 @@ func TestPeerProxy(t *testing.T) {
 			desc:                 "503 if no endpoint fetched from lease",
 			requestPath:          "/api/foo/bar",
 			informerFinishedSync: true,
-			peerCache: map[string]PeerDiscoveryCacheEntry{
+			peerCache: map[string]map[schema.GroupVersionResource]bool{
 				remoteServerID1: {
-					GVRs: map[schema.GroupVersionResource]bool{
-						{Group: "", Version: "foo", Resource: "bar"}: true,
-					},
+					{Group: "core", Version: "foo", Resource: "bar"}: true,
 				},
 			},
 			wantStatus: http.StatusServiceUnavailable,
@@ -130,11 +127,9 @@ func TestPeerProxy(t *testing.T) {
 			desc:                 "503 unreachable peer bind address",
 			requestPath:          "/api/foo/bar",
 			informerFinishedSync: true,
-			peerCache: map[string]PeerDiscoveryCacheEntry{
+			peerCache: map[string]map[schema.GroupVersionResource]bool{
 				remoteServerID1: {
-					GVRs: map[schema.GroupVersionResource]bool{
-						{Group: "", Version: "foo", Resource: "bar"}: true,
-					},
+					{Group: "core", Version: "foo", Resource: "bar"}: true,
 				},
 			},
 			reconcilerConfig: reconciler{
@@ -157,16 +152,12 @@ func TestPeerProxy(t *testing.T) {
 			desc:                 "503 if one apiserver's endpoint lease wasnt found but another valid (unreachable) apiserver was found",
 			requestPath:          "/api/foo/bar",
 			informerFinishedSync: true,
-			peerCache: map[string]PeerDiscoveryCacheEntry{
+			peerCache: map[string]map[schema.GroupVersionResource]bool{
 				remoteServerID1: {
-					GVRs: map[schema.GroupVersionResource]bool{
-						{Group: "", Version: "foo", Resource: "bar"}: true,
-					},
+					{Group: "core", Version: "foo", Resource: "bar"}: true,
 				},
 				remoteServerID2: {
-					GVRs: map[schema.GroupVersionResource]bool{
-						{Group: "", Version: "foo", Resource: "bar"}: true,
-					},
+					{Group: "core", Version: "foo", Resource: "bar"}: true,
 				},
 			},
 			reconcilerConfig: reconciler{
@@ -239,101 +230,12 @@ func TestPeerProxy(t *testing.T) {
 
 }
 
-func TestGetPeerResources(t *testing.T) {
-	testCases := []struct {
-		name      string
-		peerCache map[string]PeerDiscoveryCacheEntry
-		want      map[string][]apidiscoveryv2.APIGroupDiscovery
-	}{
-		{
-			name:      "empty peer cache",
-			peerCache: nil,
-			want:      map[string][]apidiscoveryv2.APIGroupDiscovery{},
-		},
-		{
-			name: "peer cache with local server, should be skipped",
-			peerCache: map[string]PeerDiscoveryCacheEntry{
-				localServerID: {
-					GroupDiscovery: []apidiscoveryv2.APIGroupDiscovery{
-						{
-							ObjectMeta: metav1.ObjectMeta{Name: "core"},
-						},
-					},
-				},
-				remoteServerID1: {
-					GroupDiscovery: []apidiscoveryv2.APIGroupDiscovery{
-						{
-							ObjectMeta: metav1.ObjectMeta{Name: "apps"},
-						},
-					},
-				},
-			},
-			want: map[string][]apidiscoveryv2.APIGroupDiscovery{
-				remoteServerID1: {
-					{
-						ObjectMeta: metav1.ObjectMeta{Name: "apps"},
-					},
-				},
-			},
-		},
-		{
-			name: "peer cache with multiple peers",
-			peerCache: map[string]PeerDiscoveryCacheEntry{
-				remoteServerID1: {
-					GroupDiscovery: []apidiscoveryv2.APIGroupDiscovery{
-						{
-							ObjectMeta: metav1.ObjectMeta{Name: "apps"},
-						},
-						{
-							ObjectMeta: metav1.ObjectMeta{Name: "foo"},
-						},
-					},
-				},
-				remoteServerID2: {
-					GroupDiscovery: []apidiscoveryv2.APIGroupDiscovery{
-						{
-							ObjectMeta: metav1.ObjectMeta{Name: "batch"},
-						},
-					},
-				},
-			},
-			want: map[string][]apidiscoveryv2.APIGroupDiscovery{
-				remoteServerID1: {
-					{
-						ObjectMeta: metav1.ObjectMeta{Name: "apps"},
-					},
-					{
-						ObjectMeta: metav1.ObjectMeta{Name: "foo"},
-					},
-				},
-				remoteServerID2: {
-					{
-						ObjectMeta: metav1.ObjectMeta{Name: "batch"},
-					},
-				},
-			},
-		},
-	}
-
-	for _, tt := range testCases {
-		t.Run(tt.name, func(t *testing.T) {
-			s := serializer.NewCodecFactory(runtime.NewScheme()).WithoutConversion()
-			handler, err := newFakePeerProxyHandler(true, nil, localServerID, s, nil, tt.peerCache)
-			if err != nil {
-				t.Fatalf("Error creating peer proxy handler: %v", err)
-			}
-
-			got := handler.GetPeerResources()
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
 func newFakePeerEndpointReconciler(t *testing.T) reconcilers.PeerEndpointLeaseReconciler {
 	server, sc := etcd3testing.NewUnsecuredEtcd3TestClientServer(t)
 	t.Cleanup(func() { server.Terminate(t) })
 	scheme := runtime.NewScheme()
 	metav1.AddToGroupVersion(scheme, metav1.SchemeGroupVersion)
+	//utilruntime.Must(core.AddToScheme(scheme))
 	utilruntime.Must(corev1.AddToScheme(scheme))
 	utilruntime.Must(scheme.SetVersionPriority(corev1.SchemeGroupVersion))
 	codecs := serializer.NewCodecFactory(scheme)
@@ -350,7 +252,7 @@ func newFakePeerEndpointReconciler(t *testing.T) reconcilers.PeerEndpointLeaseRe
 
 func newHandlerChain(t *testing.T, informerFinishedSync bool, handler http.Handler,
 	reconciler reconcilers.PeerEndpointLeaseReconciler,
-	localCache map[schema.GroupVersionResource]bool, peerCache map[string]PeerDiscoveryCacheEntry) http.Handler {
+	localCache map[schema.GroupVersionResource]bool, peerCache map[string]map[schema.GroupVersionResource]bool) http.Handler {
 	// Add peerproxy handler
 	s := serializer.NewCodecFactory(runtime.NewScheme()).WithoutConversion()
 	peerProxyHandler, err := newFakePeerProxyHandler(informerFinishedSync, reconciler, localServerID, s, localCache, peerCache)
@@ -371,7 +273,7 @@ func newHandlerChain(t *testing.T, informerFinishedSync bool, handler http.Handl
 
 func newFakePeerProxyHandler(informerFinishedSync bool,
 	reconciler reconcilers.PeerEndpointLeaseReconciler, id string, s runtime.NegotiatedSerializer,
-	localCache map[schema.GroupVersionResource]bool, peerCache map[string]PeerDiscoveryCacheEntry) (*peerProxyHandler, error) {
+	localCache map[schema.GroupVersionResource]bool, peerCache map[string]map[schema.GroupVersionResource]bool) (*peerProxyHandler, error) {
 	clientset := fake.NewSimpleClientset()
 	informerFactory := informers.NewSharedInformerFactory(clientset, 0)
 	leaseInformer := informerFactory.Coordination().V1().Leases()

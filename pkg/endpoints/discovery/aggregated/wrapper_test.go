@@ -24,8 +24,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"k8s.io/apimachinery/pkg/util/version"
-	"k8s.io/apiserver/pkg/endpoints/request"
 	genericfeatures "k8s.io/apiserver/pkg/features"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
@@ -41,18 +39,16 @@ const aggregatedV2Beta1JSONAccept = jsonAccept + aggregatedV2Beta1AcceptSuffix
 const aggregatedV2Beta1ProtoAccept = protobufAccept + aggregatedV2Beta1AcceptSuffix
 const aggregatedJSONAccept = jsonAccept + aggregatedAcceptSuffix
 const aggregatedProtoAccept = protobufAccept + aggregatedAcceptSuffix
-const aggregatedNoPeerJSONAccept = jsonAccept + aggregatedAcceptSuffix + ";profile=nopeer"
-const aggregatedNoPeerProtoAccept = protobufAccept + aggregatedAcceptSuffix + ";profile=nopeer"
 
 func fetchPath(handler http.Handler, path, accept string) string {
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(request.MethodGet, discoveryPath, nil)
+	req := httptest.NewRequest("GET", discoveryPath, nil)
 
 	// Ask for JSON response
 	req.Header.Set("Accept", accept)
 
 	handler.ServeHTTP(w, req)
-	return w.Body.String()
+	return string(w.Body.Bytes())
 }
 
 type fakeHTTPHandler struct {
@@ -64,16 +60,13 @@ func (f fakeHTTPHandler) ServeHTTP(resp http.ResponseWriter, req *http.Request) 
 }
 
 func TestAggregationEnabled(t *testing.T) {
-	featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.34"))
 	unaggregated := fakeHTTPHandler{data: "unaggregated"}
-	aggregated := fakeHTTPHandler{data: "nopeer-aggregated"}
-	peerAggregated := fakeHTTPHandler{data: "peer-aggregated"}
-	wrapped := WrapAggregatedDiscoveryToHandler(unaggregated, aggregated, peerAggregated)
+	aggregated := fakeHTTPHandler{data: "aggregated"}
+	wrapped := WrapAggregatedDiscoveryToHandler(unaggregated, aggregated)
 
 	testCases := []struct {
-		accept               string
-		expected             string
-		enablePeerAggregated bool
+		accept   string
+		expected string
 	}{
 		{
 			// Misconstructed/incorrect accept headers should be passed to the unaggregated handler to return an error
@@ -85,16 +78,16 @@ func TestAggregationEnabled(t *testing.T) {
 			expected: "unaggregated",
 		}, {
 			accept:   aggregatedV2Beta1JSONAccept,
-			expected: "nopeer-aggregated",
+			expected: "aggregated",
 		}, {
 			accept:   aggregatedV2Beta1ProtoAccept,
-			expected: "nopeer-aggregated",
+			expected: "aggregated",
 		}, {
 			accept:   aggregatedJSONAccept,
-			expected: "nopeer-aggregated",
+			expected: "aggregated",
 		}, {
 			accept:   aggregatedProtoAccept,
-			expected: "nopeer-aggregated",
+			expected: "aggregated",
 		}, {
 			accept:   jsonAccept,
 			expected: "unaggregated",
@@ -104,47 +97,17 @@ func TestAggregationEnabled(t *testing.T) {
 		}, {
 			// Server should return the first accepted type
 			accept:   aggregatedJSONAccept + "," + jsonAccept,
-			expected: "nopeer-aggregated",
+			expected: "aggregated",
 		}, {
 			// Server should return the first accepted type
 			accept:   aggregatedProtoAccept + "," + protobufAccept,
-			expected: "nopeer-aggregated",
-		},
-		// Peer Agg discovery cases.
-		// profile is not set (should default to peer-aggregated)
-		{
-			accept:               aggregatedJSONAccept,
-			expected:             "peer-aggregated",
-			enablePeerAggregated: true,
-		}, {
-			accept:               aggregatedProtoAccept,
-			expected:             "peer-aggregated",
-			enablePeerAggregated: true,
-		},
-		// profile=nopeer (should return no-peer)
-		{
-			accept:               aggregatedNoPeerJSONAccept,
-			expected:             "nopeer-aggregated",
-			enablePeerAggregated: true,
-		}, {
-			accept:               aggregatedNoPeerProtoAccept,
-			expected:             "nopeer-aggregated",
-			enablePeerAggregated: true,
-		},
-		// profile is set to something other than no-peer (should default to peer-aggregated)
-		{
-			accept:               aggregatedJSONAccept + ";profile=foo",
-			expected:             "peer-aggregated",
-			enablePeerAggregated: true,
+			expected: "aggregated",
 		},
 	}
 
 	for _, tc := range testCases {
 		if tc.accept == aggregatedV2Beta1JSONAccept || tc.accept == aggregatedV2Beta1ProtoAccept {
 			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, genericfeatures.AggregatedDiscoveryRemoveBetaType, false)
-		}
-		if tc.enablePeerAggregated {
-			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, genericfeatures.UnknownVersionInteroperabilityProxy, true)
 		}
 		body := fetchPath(wrapped, discoveryPath, tc.accept)
 		assert.Equal(t, tc.expected, body)

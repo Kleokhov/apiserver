@@ -19,6 +19,7 @@ package rest
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -46,7 +47,7 @@ type GenericHttpResponseChecker struct {
 func (checker GenericHttpResponseChecker) Check(resp *http.Response) error {
 	if resp.StatusCode < http.StatusOK || resp.StatusCode > http.StatusPartialContent {
 		defer resp.Body.Close()
-		bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxReadLength))
+		bodyBytes, err := ioutil.ReadAll(io.LimitReader(resp.Body, maxReadLength))
 		if err != nil {
 			return errors.NewInternalError(err)
 		}

@@ -19,7 +19,7 @@ package fieldmanager_test
 import (
 	"encoding/json"
 	"fmt"
-	"os"
+	"io/ioutil"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,7 +38,7 @@ import (
 )
 
 var fakeTypeConverter = func() managedfields.TypeConverter {
-	data, err := os.ReadFile(filepath.Join(strings.Repeat(".."+string(filepath.Separator), 8),
+	data, err := ioutil.ReadFile(filepath.Join(strings.Repeat(".."+string(filepath.Separator), 8),
 		"api", "openapi-spec", "swagger.json"))
 	if err != nil {
 		panic(err)
@@ -60,7 +60,7 @@ var fakeTypeConverter = func() managedfields.TypeConverter {
 }()
 
 func getObjectBytes(file string) []byte {
-	s, err := os.ReadFile(file)
+	s, err := ioutil.ReadFile(file)
 	if err != nil {
 		panic(err)
 	}
