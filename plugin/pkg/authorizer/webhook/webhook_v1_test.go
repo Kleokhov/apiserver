@@ -22,7 +22,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -41,7 +41,6 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
-	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/apis/apiserver"
 	"k8s.io/apiserver/pkg/authentication/user"
@@ -66,7 +65,7 @@ var testRetryBackoff = wait.Backoff{
 }
 
 func TestV1NewFromConfig(t *testing.T) {
-	dir, err := os.MkdirTemp("", "")
+	dir, err := ioutil.TempDir("", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +90,7 @@ func TestV1NewFromConfig(t *testing.T) {
 		{data.Key, clientKey},
 	}
 	for _, file := range files {
-		if err := os.WriteFile(file.name, file.data, 0400); err != nil {
+		if err := ioutil.WriteFile(file.name, file.data, 0400); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -194,7 +193,7 @@ current-context: default
 	for _, tt := range tests {
 		// Use a closure so defer statements trigger between loop iterations.
 		err := func() error {
-			tempfile, err := os.CreateTemp("", "")
+			tempfile, err := ioutil.TempFile("", "")
 			if err != nil {
 				return err
 			}
@@ -268,7 +267,7 @@ func NewV1TestServer(s V1Service, cert, key, caCert []byte) (*httptest.Server, e
 		}
 
 		var review authorizationv1.SubjectAccessReview
-		bodyData, _ := io.ReadAll(r.Body)
+		bodyData, _ := ioutil.ReadAll(r.Body)
 		if err := json.Unmarshal(bodyData, &review); err != nil {
 			http.Error(w, fmt.Sprintf("failed to decode body: %v", err), http.StatusBadRequest)
 			return
@@ -338,7 +337,7 @@ func (m *mockV1Service) HTTPStatusCode() int { return m.statusCode }
 // newV1Authorizer creates a temporary kubeconfig file from the provided arguments and attempts to load
 // a new WebhookAuthorizer from it.
 func newV1Authorizer(callbackURL string, clientCert, clientKey, ca []byte, cacheTime time.Duration, metrics metrics.AuthorizerMetrics, compiler authorizationcel.Compiler, expressions []apiserver.WebhookMatchCondition, authzName string) (*WebhookAuthorizer, error) {
-	tempfile, err := os.CreateTemp("", "")
+	tempfile, err := ioutil.TempFile("", "")
 	if err != nil {
 		return nil, err
 	}
@@ -784,10 +783,7 @@ func TestStructuredAuthzConfigFeatureEnablement(t *testing.T) {
 
 	for i, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if !test.selectorEnabled {
-				featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.33"))
-				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.AuthorizeWithSelectors, false)
-			}
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.AuthorizeWithSelectors, test.selectorEnabled)
 
 			// create new compiler because it depends on the feature gate
 			compiler := authorizationcel.NewDefaultCompiler()
